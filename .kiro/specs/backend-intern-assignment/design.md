@@ -135,11 +135,14 @@ src/
 │   ├── strategies/
 │   │   ├── local.strategy.ts        # Email/password strategy
 │   │   ├── jwt.strategy.ts          # JWT validation strategy
-│   │   ├── google.strategy.ts       # Google OAuth strategy
-│   │   └── telegram.strategy.ts     # Telegram OAuth strategy
+│   │   └── google.strategy.ts       # Google OAuth strategy
+│   ├── telegram/
+│   │   ├── telegram-auth.service.ts # Telegram ID token validation
+│   │   └── telegram-jwks.service.ts # JWKS key fetching/caching
 │   └── dto/
 │       ├── register.dto.ts
 │       ├── login.dto.ts
+│       ├── telegram-verify.dto.ts   # Telegram ID token DTO
 │       └── auth-response.dto.ts
 ├── users/                           # Users module
 │   ├── users.module.ts
@@ -199,19 +202,34 @@ src/
 9. Frontend extracts token and stores securely
 ```
 
-**Telegram OAuth Flow**:
+**Telegram Login Widget Flow** (Official Implementation):
 ```
-1. User clicks "Login with Telegram" → GET /api/v1/auth/telegram
-2. Backend redirects to Telegram OAuth authorization
-3. User authorizes → Telegram redirects to /api/v1/auth/telegram/callback
-4. Backend validates Telegram auth data using bot token
-5. Extract telegram_id and username from callback
-6. Check if user exists by telegram_oauth_id:
-   - New user: Create account with telegram_oauth_id and username
+1. Frontend loads Telegram Login Widget library (telegram-login.js)
+2. User clicks "Sign In with Telegram" button → Widget opens popup
+3. User authorizes in Telegram popup
+4. Widget receives ID token (JWT) from Telegram OAuth server
+5. Frontend callback receives: { id_token, user: { id, name, username, picture } }
+6. Frontend sends ID token to backend: POST /api/v1/auth/telegram/verify
+7. Backend validates ID token:
+   - Verify JWT signature using Telegram's JWKS (public keys)
+   - Verify issuer is "https://oauth.telegram.org"
+   - Verify audience matches Bot ID (Client ID)
+   - Verify token not expired
+8. Backend extracts user data from validated token claims
+9. Check if user exists by telegram_oauth_id (sub claim):
+   - New user: Create account with telegram_oauth_id, username, name
    - Existing user: Authenticate existing account
-7. Generate JWT with user data
-8. Redirect to frontend with token
+10. Generate application JWT with user data
+11. Return JWT to frontend: { access_token, user }
+12. Frontend stores token and redirects to dashboard
 ```
+
+**Telegram OIDC Configuration**:
+- Discovery URL: `https://oauth.telegram.org/.well-known/openid-configuration`
+- Authorization: `https://oauth.telegram.org/auth`
+- Token Exchange: `https://oauth.telegram.org/token`
+- JWKS (Public Keys): `https://oauth.telegram.org/.well-known/jwks.json`
+- Scopes: `openid profile phone telegram:bot_access`
 
 ### Security Architecture
 
@@ -291,6 +309,45 @@ interface AuthResponse {
 - JwtService: Token generation and verification
 - Passport strategies: Authentication strategy implementations
 - CacheService: Token blacklist (for logout functionality)
+- TelegramAuthService: Telegram ID token validation
+
+#### 1.1 Telegram Authentication Service
+
+**Responsibilities**:
+- Validate Telegram ID tokens (JWT)
+- Fetch and cache Telegram JWKS public keys
+- Verify token signature, issuer, audience, expiration
+- Extract user claims from validated tokens
+
+**Interface**:
+```typescript
+interface ITelegramAuthService {
+  // ID Token Validation
+  verifyIdToken(idToken: string): Promise<TelegramUserClaims>;
+  
+  // JWKS Management
+  getPublicKeys(): Promise<JsonWebKeySet>;
+  refreshPublicKeys(): Promise<void>;
+}
+
+interface TelegramUserClaims {
+  sub: string;           // Telegram user ID
+  iss: string;           // Issuer: "https://oauth.telegram.org"
+  aud: string;           // Audience: Bot ID
+  iat: number;           // Issued at timestamp
+  exp: number;           // Expiration timestamp
+  id: number;            // Telegram user ID (numeric)
+  name?: string;         // User's full name
+  preferred_username?: string; // Telegram username
+  picture?: string;      // Profile photo URL
+  phone_number?: string; // Phone number (if requested)
+}
+```
+
+**Dependencies**:
+- jose library: JWT verification and JWKS handling
+- CacheService: Cache JWKS keys (TTL: 1 hour)
+- HTTP client: Fetch JWKS from Telegram
 
 #### 2. Users Service
 
@@ -401,8 +458,7 @@ POST   /api/v1/auth/register          # Email/password registration
 POST   /api/v1/auth/login             # Email/password login
 GET    /api/v1/auth/google            # Initiate Google OAuth
 GET    /api/v1/auth/google/callback   # Google OAuth callback
-GET    /api/v1/auth/telegram          # Initiate Telegram OAuth
-GET    /api/v1/auth/telegram/callback # Telegram OAuth callback
+POST   /api/v1/auth/telegram/verify   # Verify Telegram ID token (widget callback)
 POST   /api/v1/auth/logout            # Logout (optional: token blacklist)
 GET    /api/v1/auth/profile           # Get current user profile (protected)
 ```
@@ -474,6 +530,15 @@ class CreateItemDto {
 }
 ```
 
+**TelegramVerifyDto**:
+```typescript
+class TelegramVerifyDto {
+  @IsString()
+  @IsNotEmpty()
+  id_token: string; // JWT ID token from Telegram Login Widget
+}
+```
+
 ## Data Models
 
 ### Database Schema (Prisma)
@@ -509,8 +574,9 @@ model User {
   
   // OAuth fields
   googleOauthId   String?   @unique @map("google_oauth_id")
-  telegramOauthId String?   @unique @map("telegram_oauth_id")
-  telegramUsername String?  @map("telegram_username")
+  telegramOauthId String?   @unique @map("telegram_oauth_id") // Telegram user ID (sub claim)
+  telegramUsername String?  @map("telegram_username")         // Telegram @username
+  telegramName    String?   @map("telegram_name")             // Telegram display name
   
   // Timestamps
   createdAt       DateTime  @default(now()) @map("created_at")
