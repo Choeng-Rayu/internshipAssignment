@@ -1,0 +1,66 @@
+// schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  USER
+  ADMIN
+}
+
+enum ItemStatus {
+  ACTIVE
+  COMPLETED
+  ARCHIVED
+}
+
+model User {
+  id              String    @id @default(uuid())
+  email           String?   @unique
+  passwordHash    String?   @map("password_hash")
+  role            UserRole  @default(USER)
+  
+  // OAuth fields
+  googleOauthId   String?   @unique @map("google_oauth_id")
+  telegramOauthId String?   @unique @map("telegram_oauth_id")
+  telegramUsername String?  @map("telegram_username")
+  telegramName    String?   @map("telegram_name")
+  
+  // Timestamps
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+  
+  // Relations
+  items           Item[]
+  
+  @@map("users")
+  @@index([email])
+  @@index([googleOauthId])
+  @@index([telegramOauthId])
+}
+
+model Item {
+  id          String      @id @default(uuid())
+  title       String      @db.VarChar(200)
+  description String?     @db.Text
+  status      ItemStatus  @default(ACTIVE)
+  
+  // Ownership
+  userId      String      @map("user_id")
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // Timestamps
+  createdAt   DateTime    @default(now()) @map("created_at")
+  updatedAt   DateTime    @updatedAt @map("updated_at")
+  
+  @@map("items")
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+}
